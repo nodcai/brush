@@ -245,7 +245,10 @@ impl SplatTrainer {
             #[cfg(not(target_family = "wasm"))]
             if let Some(lpips) = &self.lpips {
                 let gt_rgb = brush_loss::unpack_gt_rgb(gt_packed.clone(), composite_bg);
-                let gt_rgb_diff: Tensor<3> = Tensor::from_inner(gt_rgb);
+                // `Tensor::from_inner` leaves the dispatch tensor's
+                // `checkpointing` field unset, panicking in the conv2d
+                // below; `lift_to_autodiff` sets it.
+                let gt_rgb_diff: Tensor<3> = brush_render::burn_glue::lift_to_autodiff(gt_rgb);
                 loss = loss
                     + lpips.lpips(
                         pred_image.clone().slice(s![.., .., 0..3]).unsqueeze_dim(0),
