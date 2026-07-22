@@ -2,12 +2,14 @@
 
 pub mod config;
 pub mod load_image;
+pub mod pose_deltas;
 pub mod scene;
 pub mod scene_loader;
 
 mod formats;
 
 pub use formats::{DatasetLoadResult, load_dataset};
+pub use pose_deltas::PoseDeltas;
 
 use core::f32;
 use glam::{Mat3, Mat4, Vec3};
@@ -117,6 +119,10 @@ pub fn compute_sorted_eigenvectors(matrix: Mat3) -> (Vec3, Vec3, Vec3) {
 pub struct Dataset {
     pub train: Scene,
     pub eval: Option<Scene>,
+    /// Per-pose per-splat deformation deltas applied at training time when
+    /// the dataset was loaded with `--pose-deltas`. None for standard
+    /// (un-posed) training.
+    pub pose_deltas: Option<std::sync::Arc<PoseDeltas>>,
 }
 
 impl Dataset {
@@ -124,6 +130,7 @@ impl Dataset {
         Self {
             train: Scene::new(vec![]),
             eval: None,
+            pose_deltas: None,
         }
     }
 
@@ -135,6 +142,7 @@ impl Dataset {
             } else {
                 Some(Scene::new(eval_views))
             },
+            pose_deltas: None,
         }
     }
 

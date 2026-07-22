@@ -217,7 +217,11 @@ async fn load_dataset_inner(
                 load_args.alpha_mode,
             );
 
-            views.push(SceneView { camera, image });
+            views.push(SceneView {
+                camera,
+                image,
+                pose_idx: 0,
+            });
         }
 
         let (train_views, eval_views) = split_eval_every(views, load_args.eval_split_every);

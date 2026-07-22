@@ -1,4 +1,4 @@
-use crate::{Dataset, config::LoadDataseConfig, scene::SceneView};
+use crate::{Dataset, PoseDeltas, config::LoadDataseConfig, scene::SceneView};
 use brush_serde::{DeserializeError, SplatMessage, load_splat_from_ply};
 
 use brush_vfs::BrushVfs;
@@ -104,9 +104,78 @@ pub async fn load_dataset(
         result.init_splat
     };
 
+    let mut dataset = result.dataset;
+
+    // Optional posed-training pose-deltas file. When present, each train
+    // view gets a pose_idx pointing at a pose block in the deltas file. Two
+    // frame layouts are supported:
+    //
+    //   pose-major  frames = [p0v0, p0v1, ..., p0v(V-1), p1v0, p1v1, ...]
+    //               (view cycles inside each pose block; consecutive frames
+    //               have different cameras) → pose_idx = i / views_per_pose
+    //
+    //   view-major  frames = [p0v0, p1v0, ..., p(P-1)v0, p0v1, p1v1, ...]
+    //               (pose cycles inside each view block; consecutive frames
+    //               share the same camera) → pose_idx = i % n_poses
+    //
+    // Detected by comparing the cameras of frames 0 and 1.
+    if let Some(pose_deltas_path) = &load_args.pose_deltas {
+        let deltas = Arc::new(
+            PoseDeltas::load(vfs.clone(), Path::new(pose_deltas_path))
+                .await
+                .map_err(|e| FormatError::InvalidFormat(format!("pose deltas: {e}")))?,
+        );
+
+        let n_views = dataset.train.views.len();
+        let n_poses = deltas.num_poses as usize;
+        if n_poses == 0 || n_views % n_poses != 0 {
+            return Err(FormatError::InvalidFormat(format!(
+                "pose_deltas has {n_poses} poses but train set has {n_views} views \
+                 (must divide evenly)"
+            ))
+            .into());
+        }
+        let views_per_pose = n_views / n_poses;
+
+        let pose_major = if n_views < 2 {
+            true
+        } else {
+            let c0 = dataset.train.views[0].camera.position;
+            let c1 = dataset.train.views[1].camera.position;
+            (c0 - c1).length() > 1e-4
+        };
+        let tagged = dataset
+            .train
+            .views
+            .iter()
+            .enumerate()
+            .map(|(i, v)| SceneView {
+                image: v.image.clone(),
+                camera: v.camera,
+                pose_idx: if pose_major {
+                    (i / views_per_pose) as u32
+                } else {
+                    (i % n_poses) as u32
+                },
+            })
+            .collect();
+        dataset.train = crate::scene::Scene::new(tagged);
+        log::info!(
+            "Loaded pose deltas: {n_poses} poses × {n_splats} splats; \
+             {layout} layout, views_per_pose = {views_per_pose}",
+            n_splats = deltas.num_splats,
+            layout = if pose_major {
+                "pose-major"
+            } else {
+                "view-major"
+            },
+        );
+        dataset.pose_deltas = Some(deltas);
+    }
+
     Ok(DatasetLoadResult {
         init_splat,
-        dataset: result.dataset,
+        dataset,
         warnings: result.warnings,
     })
 }

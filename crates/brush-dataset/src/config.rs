@@ -36,4 +36,10 @@ pub struct LoadDataseConfig {
     /// Whether to interpret an alpha channel (or masks) as transparency or masking.
     #[arg(long, help_heading = "Dataset Options")]
     pub alpha_mode: Option<AlphaMode>,
+    /// Path to a file of per-pose per-splat deltas (see `pose_deltas.rs` for
+    /// the format). When set, training treats the splats as canonical
+    /// (rest-pose) parameters and applies the matching pose's deltas before
+    /// each rendered frame.
+    #[arg(long, help_heading = "Dataset Options")]
+    pub pose_deltas: Option<String>,
 }

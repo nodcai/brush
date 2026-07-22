@@ -185,6 +185,11 @@ pub(crate) async fn train_stream(
 
     let mut trainer = SplatTrainer::new(&train_stream_config.train_config, &device, bounds);
     trainer.set_view_cams(view_cams.clone());
+    // Posed training: hand the trainer the per-pose deltas so each step
+    // applies (canonical + delta) transforms before rendering.
+    if let Some(pose_deltas) = &dataset.pose_deltas {
+        trainer.set_pose_deltas(pose_deltas, &device);
+    }
 
     // Get the dataset name from the base path (if available) for interpolation.
     let dataset_name = vfs

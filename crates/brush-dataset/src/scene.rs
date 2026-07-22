@@ -17,6 +17,10 @@ pub enum ViewType {
 pub struct SceneView {
     pub image: LoadImage,
     pub camera: Camera,
+    /// Index into the pose sequence this view captures. 0 = canonical
+    /// (neutral) pose; the dataset loader assigns it when posed training is
+    /// enabled, and leaves it at 0 otherwise.
+    pub pose_idx: u32,
 }
 
 // Encapsulates a multi-view scene including cameras and the splats.
@@ -64,6 +68,7 @@ impl Scene {
             .map(|v| SceneView {
                 image: v.image.with_scale(scale),
                 camera: v.camera,
+                pose_idx: v.pose_idx,
             })
             .collect();
         Self::new(views)
@@ -148,6 +153,9 @@ pub struct SceneBatch {
     pub has_alpha: bool,
     pub alpha_mode: AlphaMode,
     pub camera: Camera,
+    /// Index into the pose-deltas table for posed training. 0 (canonical)
+    /// when posed training is disabled.
+    pub pose_idx: u32,
 }
 
 impl SceneBatch {

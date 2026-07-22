@@ -9,6 +9,7 @@ use crate::{
     splat_init::bounds_from_pos,
     stats::RefineRecord,
 };
+use brush_dataset::PoseDeltas;
 use brush_dataset::scene::SceneBatch;
 use brush_loss::{ImageLossConfig, image_loss};
 use brush_render::gaussian_splats::Splats;
@@ -63,6 +64,10 @@ pub struct SplatTrainer {
     /// Mip-Splatting 3D filter. Empty disables it. The floor itself lives on
     /// the splats (recomputed at each refine), not here.
     view_cams: Vec<(glam::Vec3, f32)>,
+    /// Pre-computed pose deltas for posed training, on the inner (non-
+    /// autodiff) backend as `[num_poses, num_splats, 7]` =
+    /// `[(dx, dy, dz, qw, qx, qy, qz)]`. None disables the deformation step.
+    pose_deltas: Option<Tensor<3>>,
     #[cfg(not(target_family = "wasm"))]
     lpips: Option<lpips::LpipsModel>,
 }
@@ -143,6 +148,7 @@ impl SplatTrainer {
             step_count: 0,
             max_sh_degree: 0,
             view_cams: Vec::new(),
+            pose_deltas: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
         }
@@ -152,6 +158,93 @@ impl SplatTrainer {
     /// the Mip-Splatting 3D filter (gated on `config.min_scale_factor > 0`).
     pub fn set_view_cams(&mut self, view_cams: Vec<(glam::Vec3, f32)>) {
         self.view_cams = view_cams;
+    }
+
+    /// Upload pose deltas to GPU and enable posed training. Each subsequent
+    /// `step()` slices the row matching `batch.pose_idx` and applies it to
+    /// the canonical transforms before the render pass. Deltas are
+    /// non-trainable; gradients flow back through the addition / quat-mul
+    /// ops into the canonical `transforms` param.
+    pub fn set_pose_deltas(&mut self, deltas: &PoseDeltas, device: &Device) {
+        let np = deltas.num_poses as usize;
+        let ns = deltas.num_splats as usize;
+        let t = Tensor::<3>::from_data(TensorData::new(deltas.deltas.clone(), [np, ns, 7]), device);
+        self.pose_deltas = Some(t);
+    }
+
+    /// Batched quaternion product `(out = a ⊗ b)`, wxyz lane order.
+    /// Used by the posed-training deformation step.
+    fn quat_mul_batch(a: Tensor<2>, b: Tensor<2>) -> Tensor<2> {
+        let aw = a.clone().slice(s![.., 0..1]);
+        let ax = a.clone().slice(s![.., 1..2]);
+        let ay = a.clone().slice(s![.., 2..3]);
+        let az = a.slice(s![.., 3..4]);
+        let bw = b.clone().slice(s![.., 0..1]);
+        let bx = b.clone().slice(s![.., 1..2]);
+        let by = b.clone().slice(s![.., 2..3]);
+        let bz = b.slice(s![.., 3..4]);
+
+        let ow = aw.clone() * bw.clone()
+            - ax.clone() * bx.clone()
+            - ay.clone() * by.clone()
+            - az.clone() * bz.clone();
+        let ox = aw.clone() * bx.clone() + ax.clone() * bw.clone() + ay.clone() * bz.clone()
+            - az.clone() * by.clone();
+        let oy = aw.clone() * by.clone() - ax.clone() * bz.clone()
+            + ay.clone() * bw.clone()
+            + az.clone() * bx.clone();
+        let oz = aw * bz + ax * by - ay * bx + az * bw;
+
+        Tensor::cat(vec![ow, ox, oy, oz], 1)
+    }
+
+    /// Build a posed `Splats` clone whose `transforms` carry the pose
+    /// deformation:
+    ///
+    /// ```text
+    /// posed_pos = canonical_pos + delta_pos[pose_idx]
+    /// posed_rot = quat_mul(delta_rot[pose_idx], canonical_rot)
+    /// ```
+    ///
+    /// `sh_coeffs` and `raw_opacities` are shared with the input — only
+    /// `transforms` is rebuilt, with its autograd graph tracing back to the
+    /// canonical `transforms` leaf.
+    fn apply_pose_deformation(splats: Splats, pose_deltas: &Tensor<3>, pose_idx: u32) -> Splats {
+        let p = pose_idx as i64;
+        let n_splats = pose_deltas.dims()[1] as i32;
+        // Slice the single-pose row [1, N, 7] then reshape to [N, 7].
+        let delta_inner = pose_deltas
+            .clone()
+            .slice(s![p..p + 1, .., ..])
+            .reshape([n_splats, 7]);
+        // Lift to autodiff as a constant to compose with
+        // splats.transforms.val() below (`lift_to_autodiff`, unlike
+        // `Tensor::from_inner`, sets the checkpointing field downstream
+        // ops rely on).
+        let delta = brush_render::burn_glue::lift_to_autodiff(delta_inner);
+
+        let delta_pos = delta.clone().slice(s![.., 0..3]);
+        let delta_rot = delta.slice(s![.., 3..7]);
+
+        let t = splats.transforms.val(); // [N, 10]
+        let pos = t.clone().slice(s![.., 0..3]);
+        let rot = t.clone().slice(s![.., 3..7]);
+        let scales = t.slice(s![.., 7..10]);
+
+        let posed_pos = pos + delta_pos;
+        let posed_rot = Self::quat_mul_batch(delta_rot, rot);
+        let posed_transforms = Tensor::cat(vec![posed_pos, posed_rot, scales], 1);
+
+        // Param::map keeps the canonical Param's id — with a fresh id, the
+        // gradient lookup in `GradientsParams::from_params` (filtered by
+        // canonical id) would find nothing.
+        Splats {
+            transforms: splats.transforms.map(|_| posed_transforms),
+            sh_coeffs: splats.sh_coeffs,
+            raw_opacities: splats.raw_opacities,
+            render_mip: splats.render_mip,
+            min_scale: splats.min_scale,
+        }
     }
 
     pub async fn step(&mut self, batch: SceneBatch, splats: Splats) -> (Splats, TrainStepStats) {
@@ -187,7 +280,14 @@ impl SplatTrainer {
         let (mut grads, visible, num_visible, loss_inner) = {
             // The splats already carry their 3D-filter floor (set at refine);
             // the render path folds it in. Optimizer/refine work on raw params.
-            let render_input = splats.clone();
+            // Posed training (when set_pose_deltas was called) substitutes
+            // transforms with their canonical+delta version before render —
+            // gradients still flow back to the canonical Param leaf because
+            // the deformed tensor's autograd graph traces through it.
+            let render_input = match &self.pose_deltas {
+                Some(pd) => Self::apply_pose_deformation(splats.clone(), pd, batch.pose_idx),
+                None => splats.clone(),
+            };
             let diff_out = render_splats(render_input, &camera, img_size, background)
                 .instrument(trace_span!("Forward"))
                 .await;
