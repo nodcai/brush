@@ -21,6 +21,8 @@ pub struct SceneView {
     /// (neutral) pose; the dataset loader assigns it when posed training is
     /// enabled, and leaves it at 0 otherwise.
     pub pose_idx: u32,
+    /// True when the dataset file named the pose for this view itself.
+    pub pose_idx_explicit: bool,
 }
 
 // Encapsulates a multi-view scene including cameras and the splats.
@@ -69,6 +71,7 @@ impl Scene {
                 image: v.image.with_scale(scale),
                 camera: v.camera,
                 pose_idx: v.pose_idx,
+                pose_idx_explicit: v.pose_idx_explicit,
             })
             .collect();
         Self::new(views)

@@ -128,48 +128,71 @@ pub async fn load_dataset(
 
         let n_views = dataset.train.views.len();
         let n_poses = deltas.num_poses as usize;
-        if n_poses == 0 || n_views % n_poses != 0 {
-            return Err(FormatError::InvalidFormat(format!(
-                "pose_deltas has {n_poses} poses but train set has {n_views} views \
-                 (must divide evenly)"
-            ))
-            .into());
+        if n_poses == 0 {
+            return Err(FormatError::InvalidFormat("pose_deltas has no poses".to_owned()).into());
         }
-        let views_per_pose = n_views / n_poses;
 
-        let pose_major = if n_views < 2 {
-            true
+        let explicit = !dataset.train.views.is_empty()
+            && dataset.train.views.iter().all(|v| v.pose_idx_explicit);
+        if explicit {
+            // Every frame names its pose (the capture manifest wrote it):
+            // views per pose may differ, only the indices must be in range.
+            if let Some(bad) = dataset.train.views.iter().find(|v| v.pose_idx as usize >= n_poses) {
+                return Err(FormatError::InvalidFormat(format!(
+                    "frame pose_index {} but pose_deltas has {n_poses} poses",
+                    bad.pose_idx
+                ))
+                .into());
+            }
+            log::info!(
+                "Loaded pose deltas: {n_poses} poses × {n_splats} splats; per-frame pose indices",
+                n_splats = deltas.num_splats,
+            );
         } else {
-            let c0 = dataset.train.views[0].camera.position;
-            let c1 = dataset.train.views[1].camera.position;
-            (c0 - c1).length() > 1e-4
-        };
-        let tagged = dataset
-            .train
-            .views
-            .iter()
-            .enumerate()
-            .map(|(i, v)| SceneView {
-                image: v.image.clone(),
-                camera: v.camera,
-                pose_idx: if pose_major {
-                    (i / views_per_pose) as u32
-                } else {
-                    (i % n_poses) as u32
-                },
-            })
-            .collect();
-        dataset.train = crate::scene::Scene::new(tagged);
-        log::info!(
-            "Loaded pose deltas: {n_poses} poses × {n_splats} splats; \
-             {layout} layout, views_per_pose = {views_per_pose}",
-            n_splats = deltas.num_splats,
-            layout = if pose_major {
-                "pose-major"
+            if n_views % n_poses != 0 {
+                return Err(FormatError::InvalidFormat(format!(
+                    "pose_deltas has {n_poses} poses but train set has {n_views} views \
+                     (must divide evenly)"
+                ))
+                .into());
+            }
+            let views_per_pose = n_views / n_poses;
+
+            let pose_major = if n_views < 2 {
+                true
             } else {
-                "view-major"
-            },
-        );
+                let c0 = dataset.train.views[0].camera.position;
+                let c1 = dataset.train.views[1].camera.position;
+                (c0 - c1).length() > 1e-4
+            };
+            let tagged = dataset
+                .train
+                .views
+                .iter()
+                .enumerate()
+                .map(|(i, v)| SceneView {
+                    image: v.image.clone(),
+                    camera: v.camera,
+                    pose_idx: if pose_major {
+                        (i / views_per_pose) as u32
+                    } else {
+                        (i % n_poses) as u32
+                    },
+                    pose_idx_explicit: false,
+                })
+                .collect();
+            dataset.train = crate::scene::Scene::new(tagged);
+            log::info!(
+                "Loaded pose deltas: {n_poses} poses × {n_splats} splats; \
+                 {layout} layout, views_per_pose = {views_per_pose}",
+                n_splats = deltas.num_splats,
+                layout = if pose_major {
+                    "pose-major"
+                } else {
+                    "view-major"
+                },
+            );
+        }
         dataset.pose_deltas = Some(deltas);
     }
 

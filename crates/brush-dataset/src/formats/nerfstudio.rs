@@ -99,6 +99,10 @@ struct FrameData {
 
     transform_matrix: Vec<Vec<f32>>,
     file_path: String,
+
+    /// Posed training: index of the pose this frame was captured in. When
+    /// every frame carries one, the block-layout heuristic is skipped.
+    pose_index: Option<u32>,
 }
 
 /// Build a `CameraModel` from a nerfstudio `camera_model` string and the
@@ -263,7 +267,8 @@ async fn read_transforms_file(
         let view = SceneView {
             image,
             camera,
-            pose_idx: 0,
+            pose_idx: frame.pose_index.unwrap_or(0),
+            pose_idx_explicit: frame.pose_index.is_some(),
         };
         results.push(view);
     }

@@ -153,6 +153,7 @@ async fn read_dataset_inner(
             camera,
             image,
             pose_idx: 0,
+            pose_idx_explicit: false,
         });
     }
 
