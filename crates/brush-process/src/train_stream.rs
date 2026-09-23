@@ -359,6 +359,7 @@ pub(crate) async fn train_stream(
                 emitter,
                 &visualize,
                 splats.clone(),
+                trainer.pose_deltas(),
                 iter,
                 eval_scene,
                 save_path,
@@ -498,6 +499,7 @@ async fn run_eval(
     emitter: &Emitter,
     visualize: &VisualizeTools,
     splats: Splats,
+    pose_deltas: Option<&burn::tensor::Tensor<3>>,
     iter: u32,
     eval_scene: &Scene,
     save_path: Option<PathBuf>,
@@ -516,8 +518,14 @@ async fn run_eval(
         brush_async::yield_now().await;
 
         let eval_img = view.image.load().await?;
+        // Posed training: each held-out view is rendered in its own pose,
+        // as a training step would render it.
+        let view_splats = match pose_deltas {
+            Some(pd) => brush_train::train::SplatTrainer::posed_splats(splats.clone(), pd, view.pose_idx),
+            None => splats.clone(),
+        };
         let sample = eval_stats(
-            splats.clone(),
+            view_splats,
             &view.camera,
             eval_img,
             view.image.alpha_mode(),

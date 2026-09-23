@@ -172,6 +172,37 @@ impl SplatTrainer {
         self.pose_deltas = Some(t);
     }
 
+    /// The pose deltas set with `set_pose_deltas`, for evaluation.
+    pub fn pose_deltas(&self) -> Option<&Tensor<3>> {
+        self.pose_deltas.as_ref()
+    }
+
+    /// Posed splats for rendering outside the training step (evaluation):
+    /// the same deformation as a training step applies, on plain tensors,
+    /// no autodiff. `splats` must be the non-autodiff (`valid()`) module.
+    pub fn posed_splats(splats: Splats, pose_deltas: &Tensor<3>, pose_idx: u32) -> Splats {
+        let p = pose_idx as i64;
+        let n_splats = pose_deltas.dims()[1] as i32;
+        let delta = pose_deltas
+            .clone()
+            .slice(s![p..p + 1, .., ..])
+            .reshape([n_splats, 7]);
+        let delta_pos = delta.clone().slice(s![.., 0..3]);
+        let delta_rot = delta.slice(s![.., 3..7]);
+        let t = splats.transforms.val();
+        let pos = t.clone().slice(s![.., 0..3]);
+        let rot = t.clone().slice(s![.., 3..7]);
+        let scales = t.slice(s![.., 7..10]);
+        let posed = Tensor::cat(vec![pos + delta_pos, Self::quat_mul_batch(delta_rot, rot), scales], 1);
+        Splats {
+            transforms: splats.transforms.map(|_| posed),
+            sh_coeffs: splats.sh_coeffs,
+            raw_opacities: splats.raw_opacities,
+            render_mip: splats.render_mip,
+            min_scale: splats.min_scale,
+        }
+    }
+
     /// Batched quaternion product `(out = a ⊗ b)`, wxyz lane order.
     /// Used by the posed-training deformation step.
     fn quat_mul_batch(a: Tensor<2>, b: Tensor<2>) -> Tensor<2> {
